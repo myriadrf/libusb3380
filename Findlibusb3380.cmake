@@ -1,5 +1,10 @@
+
 if(NOT LIBUSB3380_FOUND)
-  pkg_check_modules (LIBUSB3380_PKG libusb3380)
+  if(NOT WIN32)
+    include(FindPkgConfig)
+    pkg_check_modules (LIBUSB3380_PKG libusb3380)
+  endif(NOT WIN32)
+
   find_path(LIBUSB3380_INCLUDE_DIRS NAMES libusb3380.h
     PATHS
     ${LIBUSB3380_PKG_INCLUDE_DIRS}
