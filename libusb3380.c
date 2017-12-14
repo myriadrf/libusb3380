@@ -280,6 +280,14 @@ static void* usb3380_io_thread(void *arg)
 
 	sigfillset(&set);
 	pthread_sigmask(SIG_SETMASK, &set, NULL);
+
+	struct sched_param shed;
+	shed.sched_priority = 1;
+
+	res = pthread_setschedparam(pthread_self(), SCHED_FIFO, &shed);
+	if (res) {
+		LOG_WARN("IO thread: Unable to set realtime priority: error %d", res);
+	}
 #endif
 
 	LOG_INFO("IO thread started");
