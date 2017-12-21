@@ -170,12 +170,24 @@ enum usb3380_ep_regs {
 	EP_GPEP1_OFF = 0x040,
 	EP_GPEP2_OFF = 0x060,
 	EP_GPEP3_OFF = 0x080,
+	EP_PCIINOUT_OFF = 0x0E0,
+	EP_RCIN_OFF = 0x100,
 
 	EP_CFG = 0x300,
 	EP_RSP = 0x304,
 	EP_IRQENB = 0x308,
 	EP_STAT = 0x30c,
 	EP_AVAIL = 0x310,
+};
+
+enum usb3380_ep_size {
+	EP_FIFO_64 = 0,
+	EP_FIFO_128 = 1,
+	EP_FIFO_256 = 2,
+	EP_FIFO_512 = 3,
+	EP_FIFO_1024 = 4,
+	EP_FIFO_2048 = 5,
+	EP_FIFO_4096 = 6,
 };
 
 enum usb3380_pcictl_bits {

@@ -282,7 +282,7 @@ static void* usb3380_io_thread(void *arg)
 	pthread_sigmask(SIG_SETMASK, &set, NULL);
 
 	struct sched_param shed;
-	shed.sched_priority = 1;
+	shed.sched_priority = 2;
 
 	res = pthread_setschedparam(pthread_self(), SCHED_FIFO, &shed);
 	if (res) {
@@ -1285,24 +1285,22 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		return res;
 	}
 
-	/* 2M on BAR3, all quadrants to IN GPEP0 */
 	res = parse_bar_config(&cfg->bar2, &reg);
 	if (res) {
 		return res;
 	}
 
-	res = usb3380_csr_mm_cfg_write(ctx, BAR3CTL, reg);
+	res = usb3380_csr_mm_cfg_write(ctx, BAR2CTL, reg);
 	if (res) {
 		return res;
 	}
 
-	/* 2M on BAR2, all quadrants to OUT GPEP2 */
 	res = parse_bar_config(&cfg->bar3, &reg);
 	if (res) {
 		return res;
 	}
 
-	res = usb3380_csr_mm_cfg_write(ctx, BAR2CTL, reg);
+	res = usb3380_csr_mm_cfg_write(ctx, BAR3CTL, reg);
 	if (res) {
 		return res;
 	}
@@ -1385,14 +1383,20 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	if (res) {
 		return res;
 	}
-
+#if 0
 	// Include only GPEP0 in IN creadit calculation
 	res = usb3380_csr_pcie_cfg_read(ctx, PCIE_PORT_USBC | 0x9f0, &reg);
 	if (res) {
 		return res;
 	}
 	LOG_DEBUG("INCH %8x", reg);
-	reg |= 0xe0000000;
+#endif
+	// Enabgle credit calculation only for requested GPEPs
+	unsigned i;
+	for (reg = 0, i = 0; i < 4; i++) {
+		if (cfg->gpep_fifo_in_size[i] == 0)
+			reg |= (1U << (28 + i));
+	}
 	res = usb3380_csr_pcie_cfg_write(ctx, PCIE_PORT_USBC | 0x9f0, reg);
 	if (res) {
 		return res;
@@ -1435,7 +1439,6 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	// Check EP states
 	const char* ep_names[6] = { "CSROUT", "CSRIN", "PCIOUT", "PCIIN", "STATIN",
 								"RCIN" };
-	unsigned i;
 	for (i = 0; i < 6; i++) {
 		res = usb3380_csr_mm_cfg_read(ctx, DEP_RSP + i * 0x10, &reg);
 		if (res) {
@@ -1508,6 +1511,36 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 				i_sz, i_st, i_st + i_sz);
 	}
 
+	const struct fifo_size_base {
+		uint16_t ep; uint8_t sz; uint16_t off;
+	} fifo_in_sz[] = {
+		{ EP_EP0_OFF,      EP_FIFO_512,  0 },
+		{ EP_GPEP0_OFF,    EP_FIFO_4096, 0 + 8 + 1 },
+		{ EP_GPEP1_OFF,    EP_FIFO_128,  0 + 8 + 1 + 64 + 1 },
+		{ EP_GPEP2_OFF,    EP_FIFO_4096, 384 },
+		{ EP_GPEP3_OFF,    EP_FIFO_128,  384 + 64 + 1 },
+		{ EP_PCIINOUT_OFF, EP_FIFO_256,  384 + 64 + 1 + 4 + 1 },
+		{ EP_RCIN_OFF,     EP_FIFO_256,  384 + 64 + 1 + 4 + 1 + 4 + 1 },
+	};
+
+#if 1
+	for (i = 0; i < sizeof(fifo_in_sz) / sizeof(fifo_in_sz[0]); i++) {
+		if (fifo_in_sz[i].sz > EP_FIFO_4096)
+			continue;
+
+		res = usb3380_csr_mm_cfg_read(ctx, EP_FIFO_SIZE_BASE + fifo_in_sz[i].ep, &reg);
+		if (res) {
+			return res;
+		}
+
+		// preserve OUT settings and override IN
+		reg = (0xffff & reg) | (fifo_in_sz[i].sz << (16)) | (fifo_in_sz[i].off << (6+16));
+		res = usb3380_csr_mm_cfg_write(ctx, EP_FIFO_SIZE_BASE + fifo_in_sz[i].ep, reg);
+		if (res) {
+			return res;
+		}
+	}
+#else
 	// Reconfigure GPEP0 & GPEP2 IN sizes to 4096 & 64
 	res = usb3380_csr_mm_cfg_read(ctx, EP_FIFO_SIZE_BASE + EP_GPEP0_OFF, &reg);
 	if (res) {
@@ -1528,7 +1561,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	if (res) {
 		return res;
 	}
-
+#endif
 
 	for (i = 1; i < 5; i++) {
 		res = usb3380_csr_mm_cfg_read(ctx, EP_CFG + i * 0x20, &reg);
@@ -1537,7 +1570,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		}
 		LOG_DEBUG("EP  %9s: %08x", ep_sizes[i], reg);
 
-		reg |= 7U << 24;
+		reg |= 15U << 24;
 
 		res = usb3380_csr_mm_cfg_write(ctx, EP_CFG + i * 0x20, reg);
 		if (res) {
