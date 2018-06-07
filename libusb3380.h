@@ -218,6 +218,7 @@ typedef enum libusb3380_status {
 	DQS_TIMEOUT = 1,
 	DQS_ABORT = 2,
 	DQS_PARTIAL = 3,
+	DQS_CANCELLED = 4,
 } libusb3380_status_t;
 
 
@@ -261,7 +262,9 @@ typedef struct libusb3380_qcsr {
 
 
 struct libusb3380_qgpep;
-typedef void (*on_gpep_cb_t)(const struct libusb3380_qgpep* gpep);
+typedef void (*on_gpep_cb_t)(const struct libusb3380_qgpep* gpep,
+							 unsigned gpepno,
+							 unsigned idx);
 
 /* awaiting gpep data (device DMA in and out)  */
 typedef struct libusb3380_qgpep {
@@ -280,9 +283,14 @@ typedef struct libusb3380_qmsi_int {
 	libusb3380_as_base_t base;
 } libusb3380_qmsi_int_t;
 
+typedef struct libusb3380_configuration {
+	unsigned gp_in_cnts[LIBUSB3380_GPEP_COUNT];
+	unsigned gp_out_cnts[LIBUSB3380_GPEP_COUNT];
+} libusb3380_configuration_t;
 
 struct libusb3380_async_manager;
 int usb3380_async_start(struct libusb3380_pcidev *dev,
+						const struct libusb3380_configuration *configuration,
 						struct libusb3380_async_manager** out);
 int usb3380_async_stop(struct libusb3380_async_manager* mgr);
 
@@ -301,6 +309,7 @@ int usb3380_async_await_msi(struct libusb3380_async_manager* mgr,
 
 int usb3380_async_set_gpep_timeout(struct libusb3380_async_manager* mgr,
 								   bool ep_in, libusb3380_gpep_t gpep,
+								   unsigned idx,
 								   unsigned to_ms);
 
 
@@ -315,14 +324,30 @@ int usb3380_async_set_gpep_timeout(struct libusb3380_async_manager* mgr,
  * full, otherwise it bolcks untill we get some space in the queue
  */
 int usb3380_async_gpep_out_post(struct libusb3380_async_manager* mgr,
-								libusb3380_gpep_t ep_no,
+								libusb3380_gpep_t ep_no, unsigned idx,
 								const uint8_t* data, unsigned size,
 								on_gpep_cb_t cb, void* param);
 
 int usb3380_async_gpep_in_post(struct libusb3380_async_manager* mgr,
-							   libusb3380_gpep_t ep_no,
+							   libusb3380_gpep_t ep_no, unsigned idx,
 							   uint8_t* data, unsigned size,
 							   on_gpep_cb_t cb, void* param);
+
+int usb3380_async_gpep_cancel(struct libusb3380_async_manager* mgr,
+							  bool ep_in,
+							  libusb3380_gpep_t ep_no,
+							  unsigned idx);
+
+
+typedef void (*on_msi_cb_t)(void* param,
+							int msinum,
+							bool timedout);
+
+int usb3380_msi_in_post(struct libusb3380_async_manager* mgr,
+						unsigned timeoutms,
+						on_msi_cb_t cb,
+						void* param);
+int usb3380_msi_in_cancel(struct libusb3380_async_manager* mgr);
 
 
 #ifdef __cplusplus

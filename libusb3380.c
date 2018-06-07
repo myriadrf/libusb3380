@@ -72,12 +72,6 @@ typedef enum libusb3380_pci_master_stage {
 } libusb3380_pci_master_stage_t;
 
 
-typedef enum libusb3380_qtype {
-	Q_PCIOUT,
-	Q_GPEP,
-	Q_MSI,
-} libusb3380_qtype_t;
-
 /** Internal queue element */
 typedef struct libusb3380_data_qbase {
 	union {
@@ -86,7 +80,6 @@ typedef struct libusb3380_data_qbase {
 		libusb3380_qpci_master_t *ppcims;
 		libusb3380_qmsi_int_t *pmsi;
 	} blk;
-	libusb3380_qtype_t type;
 } libusb3380_data_qbase_t;
 
 
@@ -95,7 +88,10 @@ struct libusb3380_async_manager;
 typedef struct libusb3380_queue_header {
 	libusb3380_data_qbase_t queue;
 
-	pthread_mutex_t qmutex;
+	union {
+		pthread_mutex_t qmutex;
+		unsigned gpep_idx[2];
+	};
 	struct libusb_transfer *transfer;
 } libusb3380_queue_header_t;
 
@@ -106,9 +102,16 @@ typedef struct libusb3380_async_manager {
 	/* currently we supports only one device */
 	struct libusb3380_pcidev *dev;
 
+	libusb3380_configuration_t cfg;
+	unsigned total_gpeps;
+	unsigned gpep_in_idx_st[LIBUSB3380_GPEP_COUNT];
+	unsigned gpep_out_idx_st[LIBUSB3380_GPEP_COUNT];
+
+	libusb3380_queue_header_t *q_gpep;
+	libusb3380_qgpep_t *gpep;
+
+
 	libusb3380_queue_header_t q_pciout;
-	libusb3380_queue_header_t q_gpep_out[LIBUSB3380_GPEP_COUNT];
-	libusb3380_queue_header_t q_gpep_in[LIBUSB3380_GPEP_COUNT];
 
 	libusb3380_queue_header_t q_msi;
 
@@ -122,11 +125,6 @@ typedef struct libusb3380_async_manager {
 	libusb3380_qmsi_int_t msi;
 	sem_t msi_notify;
 
-	/* GPEP OUT */
-	libusb3380_qgpep_t gpep_out[LIBUSB3380_GPEP_COUNT];
-	/* GPEP IN */
-	libusb3380_qgpep_t gpep_in[LIBUSB3380_GPEP_COUNT];
-
 	libusb3380_qcsr_t csr;
 	sem_t csr_notify;
 
@@ -138,6 +136,9 @@ typedef struct libusb3380_async_manager {
 
 	/* interrupt RCIN */
 	uint32_t msi_data[4];
+
+	on_msi_cb_t msi_cb;
+	void* msi_param;
 
 	bool stop;
 } libusb3380_async_manager_t;
@@ -255,7 +256,22 @@ static int usb3380_int_queue_init(libusb3380_queue_header_t *q)
 		return -res;
 
 	q->transfer = libusb_alloc_transfer(0);
-	if (res)
+	if (q->transfer == NULL)
+		return -ENOMEM;
+
+	q->queue.blk.pbase = NULL;
+	return 0;
+}
+
+
+static int usb3380_int_queue_gpep_init(libusb3380_queue_header_t *q,
+									   unsigned gpepno, unsigned idx)
+{
+	q->gpep_idx[0] = gpepno;
+	q->gpep_idx[1] = idx;
+
+	q->transfer = libusb_alloc_transfer(0);
+	if (q->transfer == NULL)
 		return -ENOMEM;
 
 	q->queue.blk.pbase = NULL;
@@ -267,6 +283,12 @@ static void usb3380_int_queue_deinit(libusb3380_queue_header_t *q)
 	pthread_mutex_destroy(&q->qmutex);
 	libusb_free_transfer(q->transfer);
 }
+
+static void usb3380_int_queue_gpep_deinit(libusb3380_queue_header_t *q)
+{
+	libusb_free_transfer(q->transfer);
+}
+
 
 static void* usb3380_io_thread(void *arg)
 {
@@ -319,15 +341,31 @@ static void fill_base_in_cb(libusb3380_as_base_t* base,
 		base->status = DQS_TIMEOUT;
 		break;
 
-	case LIBUSB_TRANSFER_ERROR:
 	case LIBUSB_TRANSFER_CANCELLED:
+		base->status = DQS_CANCELLED;
+		break;
 
-	case LIBUSB_TRANSFER_STALL: /* TODO clear EP */
+	case LIBUSB_TRANSFER_STALL:
+		/* TODO clear EP */
+		LOG_ERR("GPEP 0x%02x ERROR: STALL", transfer->endpoint);
+		base->status = DQS_ABORT;
+		break;
+
 	case LIBUSB_TRANSFER_NO_DEVICE:
+		LOG_ERR("GPEP 0x%02x ERROR: NO DEVICE", transfer->endpoint);
+		base->status = DQS_ABORT;
+		break;
 
 	case LIBUSB_TRANSFER_OVERFLOW:
-		LOG_ERR("GPEP IN ERROR: %d", transfer->status);
+		LOG_ERR("GPEP 0x%02x ERROR: OVERFLOW", transfer->endpoint);
 		base->status = DQS_ABORT;
+		break;
+
+	default:
+	case LIBUSB_TRANSFER_ERROR:
+		LOG_ERR("GPEP 0x%02x ERROR: %d", transfer->endpoint, transfer->status);
+		base->status = DQS_ABORT;
+		break;
 	}
 
 	base->written = (unsigned)transfer->actual_length;
@@ -352,7 +390,7 @@ static void on_pciout_cb(struct libusb_transfer *transfer)
 			 pciout->data[0],
 			 pciout->data[1],
 			 transfer->status);
-#if 1
+
 	if (transfer->status == LIBUSB_TRANSFER_COMPLETED &&
 			transfer->actual_length == transfer->length &&
 			pciout->type == RC_PCIE_READ &&
@@ -369,7 +407,7 @@ static void on_pciout_cb(struct libusb_transfer *transfer)
 		// Notify abortion
 		transfer->status = LIBUSB_TRANSFER_ERROR;
 	}
-#endif
+
 	// Notify waiting thread
 	notify_pciout(mgr);
 }
@@ -416,16 +454,18 @@ static void on_rcin_cb(struct libusb_transfer *transfer)
 	assert(res == 0);
 }
 
-static void prepare_ptransfer_rcin(libusb3380_async_manager_t* mgr)
+static void prepare_ptransfer_rcin(libusb3380_async_manager_t* mgr,
+								   libusb_transfer_cb_fn callback,
+								   unsigned timeout)
 {
 	libusb_fill_interrupt_transfer(mgr->q_msi.transfer,
 								   mgr->dev->ctx->handle,
 								   EP_RCIN | LIBUSB_ENDPOINT_IN,
 								   (uint8_t*)mgr->msi_data,
 								   16,
-								   on_rcin_cb,
+								   callback,
 								   mgr,
-								   100);
+								   timeout);
 	mgr->q_msi.transfer->flags = 0;
 }
 
@@ -475,23 +515,6 @@ restart:
 	if (res) {
 		goto failed_in_lock;
 	}
-#if 0
-	if (type == RC_PCIE_READ &&
-			mgr->q_pciout.transfer->actual_length == mgr->q_pciout.transfer->length) {
-		mgr->q_pciout.transfer->endpoint = EP_PCIIN | LIBUSB_ENDPOINT_IN;
-		mgr->q_pciout.transfer->length = dw_count * 4;
-
-		res = libusb_submit_transfer(mgr->q_pciout.transfer);
-		if (res) {
-			goto failed_in_lock; // TODO error code
-		}
-
-		res = sem_wait(&mgr->pciout_notify);
-		if (res) {
-			goto failed_in_lock;
-		}
-	}
-#endif
 
 	if (pciout->base.status == DQS_PARTIAL) {
 		if (type == RC_PCIE_READ) {
@@ -547,6 +570,7 @@ int usb3380_async_await_msi(struct libusb3380_async_manager* mgr,
 		return res;
 	}
 
+	prepare_ptransfer_rcin(mgr, on_rcin_cb, 100);
 	res = libusb_submit_transfer(mgr->q_msi.transfer);
 	if (res) {
 		goto failed_in_lock; // TODO error code
@@ -569,22 +593,72 @@ failed_in_lock:
 	return res;
 }
 
+static int libusb_to_errno(int libusberr)
+{
+	switch (libusberr) {
+	case LIBUSB_SUCCESS:
+		return 0;
+
+	case LIBUSB_ERROR_IO:
+		return -EIO;
+
+	case LIBUSB_ERROR_INVALID_PARAM:
+		return -EINVAL;
+
+	case LIBUSB_ERROR_ACCESS:
+		return -EPERM;
+
+	case LIBUSB_ERROR_NO_DEVICE:
+		return -ENODEV;
+
+	case LIBUSB_ERROR_NOT_FOUND:
+		return -ENXIO;
+
+	case LIBUSB_ERROR_BUSY:
+		return -EBUSY;
+
+	case LIBUSB_ERROR_TIMEOUT:
+		return -ETIMEDOUT;
+
+	case LIBUSB_ERROR_OVERFLOW:
+		return -EOVERFLOW;
+
+	case LIBUSB_ERROR_PIPE:
+		return -EPIPE;
+
+	case LIBUSB_ERROR_INTERRUPTED:
+		return -EINTR;
+
+	case LIBUSB_ERROR_NO_MEM:
+		return -ENOMEM;
+
+	case LIBUSB_ERROR_NOT_SUPPORTED:
+		return -EOPNOTSUPP;
+
+	case LIBUSB_ERROR_OTHER:
+		return -ESRCH; //TODO find better;
+	};
+	return -EFAULT;
+}
+
 static int gpep_transfer_post(libusb3380_queue_header_t* q,
 								 libusb3380_qgpep_t *d)
 {
 	q->transfer->length = d->base.size;
 	q->transfer->buffer = d->pdata;
 
-	return libusb_submit_transfer(q->transfer);
+	return libusb_to_errno(libusb_submit_transfer(q->transfer));
 }
 
 static void on_gpep_cb(struct libusb_transfer *transfer)
 {
-	LOG_DUMP("TransferCB EP:%02x done", transfer->endpoint);
-
 	libusb3380_queue_header_t* qh = (libusb3380_queue_header_t*)transfer->user_data;
+
+	LOG_DUMP("TransferCB EP:%02x [%d;%d] done", transfer->endpoint,
+			 qh->gpep_idx[0], qh->gpep_idx[1]);
+
 	fill_base_in_cb(qh->queue.blk.pbase, qh->transfer);
-	qh->queue.blk.pgpep->cb_done(qh->queue.blk.pgpep);
+	qh->queue.blk.pgpep->cb_done(qh->queue.blk.pgpep, qh->gpep_idx[0], qh->gpep_idx[1]);
 }
 
 static void prepare_ptransfer_gpep(libusb3380_async_manager_t* mgr,
@@ -594,7 +668,6 @@ static void prepare_ptransfer_gpep(libusb3380_async_manager_t* mgr,
 								   unsigned int timeout)
 {
 	hdr->queue.blk.pgpep = queue;
-	hdr->queue.type = Q_GPEP;
 
 	libusb_fill_bulk_transfer(hdr->transfer,
 							  mgr->dev->ctx->handle,
@@ -610,13 +683,17 @@ static void prepare_ptransfer_gpep(libusb3380_async_manager_t* mgr,
 
 int usb3380_async_gpep_out_post(struct libusb3380_async_manager* mgr,
 								libusb3380_gpep_t ep_no,
+								unsigned idx,
 								const uint8_t* data, unsigned size,
 								on_gpep_cb_t cb, void* param)
 {
 	if (ep_no > LIBUSB3380_GPEP3 || ep_no < LIBUSB3380_GPEP0)
 		return -EINVAL;
+	if (mgr->cfg.gp_out_cnts[ep_no] <= idx)
+		return -EINVAL;
 
-	libusb3380_qgpep_t *gpep_out = &mgr->gpep_out[ep_no];
+	unsigned gidx = mgr->gpep_out_idx_st[ep_no] + idx;
+	libusb3380_qgpep_t *gpep_out = &mgr->gpep[gidx];
 
 	// TODO check multi thread access
 	gpep_out->base.size = size;
@@ -624,18 +701,22 @@ int usb3380_async_gpep_out_post(struct libusb3380_async_manager* mgr,
 	gpep_out->cb_done = cb;
 	gpep_out->param = param;
 
-	return gpep_transfer_post(&mgr->q_gpep_out[ep_no], gpep_out);
+	return gpep_transfer_post(&mgr->q_gpep[gidx], gpep_out);
 }
 
 int usb3380_async_gpep_in_post(struct libusb3380_async_manager* mgr,
 							   libusb3380_gpep_t ep_no,
+							   unsigned idx,
 							   uint8_t* data, unsigned size,
 							   on_gpep_cb_t cb, void* param)
 {
 	if (ep_no > LIBUSB3380_GPEP3 || ep_no < LIBUSB3380_GPEP0)
 		return -EINVAL;
+	if (mgr->cfg.gp_in_cnts[ep_no] <= idx)
+		return -EINVAL;
 
-	libusb3380_qgpep_t *gpep_in = &mgr->gpep_in[ep_no];
+	unsigned gidx = mgr->gpep_in_idx_st[ep_no] + idx;
+	libusb3380_qgpep_t *gpep_in = &mgr->gpep[gidx];
 
 	// TODO check multi thread access
 	gpep_in->base.size = size;
@@ -643,66 +724,118 @@ int usb3380_async_gpep_in_post(struct libusb3380_async_manager* mgr,
 	gpep_in->cb_done = cb;
 	gpep_in->param = param;
 
-	return gpep_transfer_post(&mgr->q_gpep_in[ep_no], gpep_in);
+	return gpep_transfer_post(&mgr->q_gpep[gidx], gpep_in);
+}
+
+int usb3380_async_gpep_cancel(struct libusb3380_async_manager* mgr,
+							  bool ep_in,
+							  libusb3380_gpep_t gpep,
+							  unsigned idx)
+{
+	if (gpep > LIBUSB3380_GPEP3 || gpep < LIBUSB3380_GPEP0)
+		return -EINVAL;
+
+	unsigned gidx;
+	if (ep_in) {
+		if (mgr->cfg.gp_in_cnts[gpep] <= idx)
+			return -EINVAL;
+		gidx = mgr->gpep_in_idx_st[gpep] + idx;
+	} else {
+		if (mgr->cfg.gp_out_cnts[gpep] <= idx)
+			return -EINVAL;
+		gidx = mgr->gpep_out_idx_st[gpep] + idx;
+	}
+
+	return libusb_to_errno(libusb_cancel_transfer(mgr->q_gpep[gidx].transfer));
 }
 
 int usb3380_async_set_gpep_timeout(struct libusb3380_async_manager* mgr,
 								   bool ep_in, libusb3380_gpep_t gpep,
+								   unsigned idx,
 								   unsigned to_ms)
 {
 	if (gpep > LIBUSB3380_GPEP3 || gpep < LIBUSB3380_GPEP0)
 		return -EINVAL;
 
+	unsigned gidx;
 	if (ep_in) {
-		mgr->q_gpep_in[gpep].transfer->timeout = to_ms;
+		if (mgr->cfg.gp_in_cnts[gpep] <= idx)
+			return -EINVAL;
+		gidx = mgr->gpep_in_idx_st[gpep] + idx;
 	} else {
-		mgr->q_gpep_out[gpep].transfer->timeout = to_ms;
+		if (mgr->cfg.gp_out_cnts[gpep] <= idx)
+			return -EINVAL;
+		gidx = mgr->gpep_out_idx_st[gpep] + idx;
 	}
+	mgr->q_gpep[gidx].transfer->timeout = to_ms;
 	return 0;
 }
 
-
 int usb3380_async_start(struct libusb3380_pcidev *dev,
+						const struct libusb3380_configuration *configuration,
 						struct libusb3380_async_manager **out)
 {
 	libusb3380_async_manager_t* mgr;
 	int res;
-	unsigned ep_no;
 	const unsigned def_timeout = 1000;
-
+	unsigned idx;
 
 	mgr = (libusb3380_async_manager_t*)malloc(sizeof(libusb3380_async_manager_t));
 	if (!mgr)
 		return -ENOMEM;
+	memset(mgr, 0, sizeof(*mgr));
 
 	mgr->dev = dev;
 	mgr->stop = false;
+	mgr->cfg = *configuration;
+	for (unsigned k = 0; k < LIBUSB3380_GPEP_COUNT; k++) {
+		mgr->total_gpeps += configuration->gp_in_cnts[k];
+		mgr->total_gpeps += configuration->gp_out_cnts[k];
+	}
 
-	res = usb3380_int_queue_init(&mgr->q_gpep_out[LIBUSB3380_GPEP0]);
-	if (res)
-		goto failed_gpep_out_0;
-	res = usb3380_int_queue_init(&mgr->q_gpep_out[LIBUSB3380_GPEP1]);
-	if (res)
-		goto failed_gpep_out_1;
-	res = usb3380_int_queue_init(&mgr->q_gpep_out[LIBUSB3380_GPEP2]);
-	if (res)
-		goto failed_gpep_out_2;
-	res = usb3380_int_queue_init(&mgr->q_gpep_out[LIBUSB3380_GPEP3]);
-	if (res)
-		goto failed_gpep_out_3;
+	if (mgr->total_gpeps > 0) {
+		mgr->q_gpep = (libusb3380_queue_header_t*)malloc(sizeof(libusb3380_queue_header_t) * mgr->total_gpeps);
+		if (mgr->q_gpep == NULL) {
+			res = -ENOMEM;
+			goto q_gpep_alloc_fail;
+		}
+		mgr->gpep = (libusb3380_qgpep_t*)malloc(sizeof(libusb3380_qgpep_t) * mgr->total_gpeps);
+		if (mgr->gpep == NULL) {
+			res = -ENOMEM;
+			goto gpep_alloc_fail;
+		}
+		memset(mgr->q_gpep, 0, sizeof(libusb3380_queue_header_t) * mgr->total_gpeps);
+		memset(mgr->gpep, 0, sizeof(libusb3380_qgpep_t) * mgr->total_gpeps);
 
-	res = usb3380_int_queue_init(&mgr->q_gpep_in[LIBUSB3380_GPEP0]);
-	if (res)
-		goto failed_gpep_in_0;
-	res = usb3380_int_queue_init(&mgr->q_gpep_in[LIBUSB3380_GPEP1]);
-	if (res)
-		goto failed_gpep_in_1;
-	res = usb3380_int_queue_init(&mgr->q_gpep_in[LIBUSB3380_GPEP2]);
-	if (res)
-		goto failed_gpep_in_2;
-	res = usb3380_int_queue_init(&mgr->q_gpep_in[LIBUSB3380_GPEP3]);
-	if (res)
-		goto failed_gpep_in_3;
+		idx = 0;
+		for (unsigned l = 0; l < LIBUSB3380_GPEP_COUNT; l++) {
+			mgr->gpep_in_idx_st[l] = idx;
+			for (unsigned m = 0; m < mgr->cfg.gp_in_cnts[l]; m++, idx++) {
+				res = usb3380_int_queue_gpep_init(&mgr->q_gpep[idx], l, m);
+				if (res)
+					goto failed_pciout;
+				prepare_ptransfer_gpep(mgr,
+									   &mgr->q_gpep[idx],
+									   &mgr->gpep[idx],
+									   convert_gpep_no(l) | LIBUSB_ENDPOINT_IN,
+									   def_timeout);
+			}
+		}
+		for (unsigned l = LIBUSB3380_GPEP_COUNT; l < 2 * LIBUSB3380_GPEP_COUNT; l++) {
+			mgr->gpep_out_idx_st[l - LIBUSB3380_GPEP_COUNT] = idx;
+			for (unsigned m = 0; m < mgr->cfg.gp_out_cnts[l - LIBUSB3380_GPEP_COUNT]; m++, idx++) {
+				res = usb3380_int_queue_gpep_init(&mgr->q_gpep[idx], l, m);
+				if (res)
+					goto failed_pciout;
+				prepare_ptransfer_gpep(mgr,
+									   &mgr->q_gpep[idx],
+									   &mgr->gpep[idx],
+									   convert_gpep_no(l - LIBUSB3380_GPEP_COUNT) | LIBUSB_ENDPOINT_OUT,
+									   def_timeout);
+			}
+		}
+		assert(mgr->total_gpeps == idx);
+	}
 
 	res = usb3380_int_queue_init(&mgr->q_pciout);
 	if (res)
@@ -713,20 +846,6 @@ int usb3380_async_start(struct libusb3380_pcidev *dev,
 		goto failed_msi;
 
 	prepare_ptransfer_pciout(mgr);
-	prepare_ptransfer_rcin(mgr);
-
-	for (ep_no = LIBUSB3380_GPEP0; ep_no < LIBUSB3380_GPEP_COUNT; ep_no++) {
-		prepare_ptransfer_gpep(mgr,
-							   &mgr->q_gpep_out[ep_no],
-							   &mgr->gpep_out[ep_no],
-							   convert_gpep_no(ep_no) | LIBUSB_ENDPOINT_OUT,
-							   def_timeout);
-		prepare_ptransfer_gpep(mgr,
-							   &mgr->q_gpep_in[ep_no],
-							   &mgr->gpep_in[ep_no],
-							   convert_gpep_no(ep_no) | LIBUSB_ENDPOINT_IN,
-							   def_timeout);
-	}
 
 	res = sem_init(&mgr->pciout_notify, 0, 0);
 	if (res) {
@@ -757,30 +876,21 @@ failed_sem_pci:
 failed_msi:
 	usb3380_int_queue_deinit(&mgr->q_pciout);
 failed_pciout:
-	usb3380_int_queue_deinit(&mgr->q_gpep_in[LIBUSB3380_GPEP3]);
-failed_gpep_in_3:
-	usb3380_int_queue_deinit(&mgr->q_gpep_in[LIBUSB3380_GPEP2]);
-failed_gpep_in_2:
-	usb3380_int_queue_deinit(&mgr->q_gpep_in[LIBUSB3380_GPEP1]);
-failed_gpep_in_1:
-	usb3380_int_queue_deinit(&mgr->q_gpep_in[LIBUSB3380_GPEP0]);
-failed_gpep_in_0:
-	usb3380_int_queue_deinit(&mgr->q_gpep_out[LIBUSB3380_GPEP3]);
-failed_gpep_out_3:
-	usb3380_int_queue_deinit(&mgr->q_gpep_out[LIBUSB3380_GPEP2]);
-failed_gpep_out_2:
-	usb3380_int_queue_deinit(&mgr->q_gpep_out[LIBUSB3380_GPEP1]);
-failed_gpep_out_1:
-	usb3380_int_queue_deinit(&mgr->q_gpep_out[LIBUSB3380_GPEP0]);
-failed_gpep_out_0:
+	for (idx = 0; idx < mgr->total_gpeps; idx++) {
+		if (mgr->q_gpep[idx].transfer) {
+			usb3380_int_queue_gpep_deinit(&mgr->q_gpep[idx]);
+		}
+	}
+	free(mgr->q_gpep);
+gpep_alloc_fail:
+	free(mgr->gpep);
+q_gpep_alloc_fail:
 	free(mgr);
 	return res;
 }
 
 int usb3380_async_stop(struct libusb3380_async_manager* mgr)
 {
-	unsigned ep_no;
-
 	mgr->stop = true;
 	pthread_join(mgr->io_thread, NULL);
 
@@ -789,10 +899,11 @@ int usb3380_async_stop(struct libusb3380_async_manager* mgr)
 	usb3380_int_queue_deinit(&mgr->q_msi);
 	usb3380_int_queue_deinit(&mgr->q_pciout);
 
-	for (ep_no = LIBUSB3380_GPEP0; ep_no < LIBUSB3380_GPEP_COUNT; ep_no++) {
-		usb3380_int_queue_deinit(&mgr->q_gpep_in[ep_no]);
-		usb3380_int_queue_deinit(&mgr->q_gpep_out[ep_no]);
+	for (unsigned idx = 0; idx < mgr->total_gpeps; idx++) {
+		usb3380_int_queue_gpep_deinit(&mgr->q_gpep[idx]);
 	}
+	free(mgr->q_gpep);
+	free(mgr->gpep);
 
 	free(mgr);
 	return 0;
@@ -1044,7 +1155,7 @@ static int usb3380_int_pci_read(libusb3380_context_t* ctx, uint32_t ctrl,
 
 	if (written != 4 * data_size_dw) {
 		LOG_ERR("Written %d != %d requested!", written, data_size_dw);
-		return -EIO;
+		return LIBUSB_ERROR_IO;
 	}
 	return 0;
 }
@@ -1056,7 +1167,8 @@ int usb3380_pci_cfg_read(libusb3380_context_t* ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_CONFIG |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_READ |
 			(1 << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pci_read(ctx, flags, addr, data, 1);
+	int res = usb3380_int_pci_read(ctx, flags, addr, data, 1);
+	return libusb_to_errno(res);
 }
 
 int usb3380_pci_cfg_write(libusb3380_context_t* ctx, uint32_t addr,
@@ -1065,7 +1177,8 @@ int usb3380_pci_cfg_write(libusb3380_context_t* ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_CONFIG |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_WRITE |
 			(1 << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pciout_sync(ctx, flags, addr, &data, 1);
+	int res = usb3380_int_pciout_sync(ctx, flags, addr, &data, 1);
+	return libusb_to_errno(res);
 }
 
 
@@ -1211,6 +1324,17 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	if (res) {
 		return res;
 	}
+	res = usb3380_csr_mm_cfg_write(ctx, DEVINIT, reg);
+	if (res) {
+		return res;
+	}
+	do {
+		res = usb3380_csr_mm_cfg_read(ctx, DEVINIT, &reg);
+		if (res) {
+			return res;
+		}
+		usleep(1000);
+	} while (reg & (1<<2));
 #endif
 #if 0
 	for (int i = 1; i < 5; i++) {
@@ -1523,7 +1647,6 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		{ EP_RCIN_OFF,     EP_FIFO_256,  384 + 64 + 1 + 4 + 1 + 4 + 1 },
 	};
 
-#if 1
 	for (i = 0; i < sizeof(fifo_in_sz) / sizeof(fifo_in_sz[0]); i++) {
 		if (fifo_in_sz[i].sz > EP_FIFO_4096)
 			continue;
@@ -1540,28 +1663,6 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 			return res;
 		}
 	}
-#else
-	// Reconfigure GPEP0 & GPEP2 IN sizes to 4096 & 64
-	res = usb3380_csr_mm_cfg_read(ctx, EP_FIFO_SIZE_BASE + EP_GPEP0_OFF, &reg);
-	if (res) {
-		return res;
-	}
-	reg = (0xffff & reg) | (6 << (16)) | (9 << (6+16));
-	res = usb3380_csr_mm_cfg_write(ctx, EP_FIFO_SIZE_BASE + EP_GPEP0_OFF, reg);
-	if (res) {
-		return res;
-	}
-
-	res = usb3380_csr_mm_cfg_read(ctx, EP_FIFO_SIZE_BASE + EP_GPEP2_OFF, &reg);
-	if (res) {
-		return res;
-	}
-	reg = (0xffff & reg) | (0 << (16)) | (74 << (6+16));
-	res = usb3380_csr_mm_cfg_write(ctx, EP_FIFO_SIZE_BASE + EP_GPEP2_OFF, reg);
-	if (res) {
-		return res;
-	}
-#endif
 
 	for (i = 1; i < 5; i++) {
 		res = usb3380_csr_mm_cfg_read(ctx, EP_CFG + i * 0x20, &reg);
@@ -1892,7 +1993,8 @@ int usb3380_pci_dev_mem_read32(libusb3380_context_t* ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_MEMORY |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_READ |
 			(1 << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pci_read(ctx, flags, addr, data, 1);
+	int res = usb3380_int_pci_read(ctx, flags, addr, data, 1);
+	return libusb_to_errno(res);
 }
 
 int usb3380_pci_dev_mem_read32_n(libusb3380_context_t* ctx, uint32_t addr,
@@ -1901,7 +2003,8 @@ int usb3380_pci_dev_mem_read32_n(libusb3380_context_t* ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_MEMORY |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_READ |
 			(count_dw << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pci_read(ctx, flags, addr, data, count_dw);
+	int res = usb3380_int_pci_read(ctx, flags, addr, data, count_dw);
+	return libusb_to_errno(res);
 }
 
 int usb3380_pci_dev_mem_write32(libusb3380_context_t *ctx, uint32_t addr,
@@ -1910,7 +2013,8 @@ int usb3380_pci_dev_mem_write32(libusb3380_context_t *ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_MEMORY |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_WRITE |
 			(1 << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pciout_sync(ctx, flags, addr, &data, 1);
+	int res = usb3380_int_pciout_sync(ctx, flags, addr, &data, 1);
+	return libusb_to_errno(res);
 }
 
 int usb3380_pci_dev_mem_write32_n(libusb3380_context_t* ctx, uint32_t addr,
@@ -1919,7 +2023,8 @@ int usb3380_pci_dev_mem_write32_n(libusb3380_context_t* ctx, uint32_t addr,
 	uint32_t flags = CSR_BYTE_EN_ALL | PCIMSTCTL_CMD_MEMORY |
 			PCIMSTCTL_MASTER_START | PCIMSTCTL_PCIE_WRITE |
 			(count_dw << PCIMSTCTL_PCIE_DW_LEN_OFF_BITS);
-	return usb3380_int_pciout_sync(ctx, flags, addr, data, count_dw);
+	int res = usb3380_int_pciout_sync(ctx, flags, addr, data, count_dw);
+	return libusb_to_errno(res);
 }
 
 int usb3380_pci_wait_interrupt(libusb3380_context_t *ctx, long timeoutms)
@@ -1933,7 +2038,7 @@ int usb3380_pci_wait_interrupt(libusb3380_context_t *ctx, long timeoutms)
 		if (res) {
 			LOG_ERR("Unable to usb3380_int_rcin_sync! error=`%s` (%d)",
 					libusb_error_name(res), res);
-			return res;
+			return libusb_to_errno(res);
 		}
 
 		LOG_DUMP("MSI %08x %08x %08x %08x", bufmsgs[0], bufmsgs[1], bufmsgs[2], bufmsgs[3]);
@@ -1944,7 +2049,7 @@ int usb3380_pci_wait_interrupt(libusb3380_context_t *ctx, long timeoutms)
 
 		res = usb3380_int_statin_sync(ctx, bufmsgs, 2, &written, timeoutms);
 		if (res) {
-			return res;
+			return libusb_to_errno(res);
 		}
 
 		LOG_DUMP("STAT %08x %08x", bufmsgs[0], bufmsgs[1]);
@@ -1963,7 +2068,7 @@ int usb3380_gpep_read(libusb3380_context_t* ctx, libusb3380_gpep_t no,
 								   size,
 								   written,
 								   to);
-	return res;
+	return libusb_to_errno(res);
 }
 
 
@@ -1977,6 +2082,49 @@ int usb3380_gpep_write(libusb3380_context_t* ctx, libusb3380_gpep_t no,
 								   size,
 								   written,
 								   to);
-	return res;
+	return libusb_to_errno(res);
 }
 
+
+static void on_async_msi_cb(struct libusb_transfer *transfer)
+{
+	libusb3380_async_manager_t* mgr = (libusb3380_async_manager_t*)transfer->user_data;
+	int msi_num = -1;
+
+	fill_base_in_cb(&mgr->msi.base, mgr->q_msi.transfer);
+
+	if (mgr->msi.base.status == DQS_SUCCESS) {
+		msi_num = mgr->msi_data[3] - MSI_DEF_DATA;
+
+		LOG_DUMP("on_async_msi_cb addr=%08x:%08x:%08x:%08x num=%d",
+				mgr->msi_data[0], mgr->msi_data[1], mgr->msi_data[2],
+				mgr->msi_data[3], msi_num);
+
+		if (msi_num < 0 || msi_num > 31) {
+			msi_num = -1;
+		}
+	}
+
+	mgr->msi_cb(mgr->msi_param, msi_num, mgr->msi.base.status == DQS_TIMEOUT);
+}
+
+
+int usb3380_msi_in_post(struct libusb3380_async_manager* mgr,
+						unsigned timeoutms,
+						on_msi_cb_t cb,
+						void* param)
+{
+	int res;
+	mgr->msi_cb = cb;
+	mgr->msi_param = param;
+
+	prepare_ptransfer_rcin(mgr, on_async_msi_cb, timeoutms);
+	res = libusb_submit_transfer(mgr->q_msi.transfer);
+
+	return libusb_to_errno(res);
+}
+
+int usb3380_msi_in_cancel(struct libusb3380_async_manager* mgr)
+{
+	return libusb_to_errno(libusb_cancel_transfer(mgr->q_msi.transfer));
+}
