@@ -380,7 +380,7 @@ static void notify_pciout(libusb3380_async_manager_t* mgr)
 	assert(res == 0);
 }
 
-static void on_pciout_cb(struct libusb_transfer *transfer)
+static LIBUSB_CALL void on_pciout_cb(struct libusb_transfer *transfer)
 {
 	libusb3380_async_manager_t* mgr = (libusb3380_async_manager_t*)transfer->user_data;
 	libusb3380_qpci_master_t* pciout = &mgr->pciout;
@@ -426,7 +426,7 @@ static void prepare_ptransfer_pciout(libusb3380_async_manager_t* mgr)
 	mgr->q_pciout.transfer->flags = 0;
 }
 
-static void on_rcin_cb(struct libusb_transfer *transfer)
+static LIBUSB_CALL void on_rcin_cb(struct libusb_transfer *transfer)
 {
 	libusb3380_async_manager_t* mgr = (libusb3380_async_manager_t*)transfer->user_data;
 	int res;
@@ -650,7 +650,7 @@ static int gpep_transfer_post(libusb3380_queue_header_t* q,
 	return libusb_to_errno(libusb_submit_transfer(q->transfer));
 }
 
-static void on_gpep_cb(struct libusb_transfer *transfer)
+static LIBUSB_CALL void on_gpep_cb(struct libusb_transfer *transfer)
 {
 	libusb3380_queue_header_t* qh = (libusb3380_queue_header_t*)transfer->user_data;
 
@@ -2086,7 +2086,7 @@ int usb3380_gpep_write(libusb3380_context_t* ctx, libusb3380_gpep_t no,
 }
 
 
-static void on_async_msi_cb(struct libusb_transfer *transfer)
+static LIBUSB_CALL void on_async_msi_cb(struct libusb_transfer *transfer)
 {
 	libusb3380_async_manager_t* mgr = (libusb3380_async_manager_t*)transfer->user_data;
 	int msi_num = -1;

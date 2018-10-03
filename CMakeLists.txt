@@ -56,7 +56,12 @@ INSTALL(
 include_directories(${LIBUSB_1_INCLUDE_DIRS})
 include_directories(.)
 
-add_library(usb3380 SHARED libusb3380.c)
+set(USB3380_FILES libusb3380.c)
+if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+    set(USB3380_FILES ${USB3380_FILES} xtrx_port.c)
+endif()
+
+add_library(usb3380 SHARED ${USB3380_FILES})
 target_link_libraries(usb3380 ${LIBUSB_1_LIBRARIES} ${SYSTEM_LIBS})
 set_target_properties(usb3380 PROPERTIES VERSION ${LIBVER} SOVERSION ${MAJOR_VERSION})
 

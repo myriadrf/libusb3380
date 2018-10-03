@@ -130,6 +130,10 @@ unsigned sleep(unsigned seconds);
 
 int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout);
 
+int sem_trywait(sem_t *sem);
+
+int sem_getvalue(sem_t *sem, int *sval);
+
 /** @ingroup dynamic
  * Emulation of dl functions
  */
@@ -188,6 +192,7 @@ static inline int posix_memalign(void **memptr, size_t alignment, size_t size) {
 
 // TODO replace this constant
 #define ENAVAIL 1000
+#define ENOSTR  1001
 
 #else
 #error Unknown platform
