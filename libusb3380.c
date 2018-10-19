@@ -1184,6 +1184,11 @@ int usb3380_pci_cfg_write(libusb3380_context_t* ctx, uint32_t addr,
 
 int usb3380_context_init(libusb3380_context_t** octx)
 {
+	return usb3380_context_init_ex(octx, NULL, NULL);
+}
+
+int usb3380_context_init_ex(libusb3380_context_t** octx, libusb_device *dev, libusb_context *lctx)
+{
 	int res;
 	libusb3380_context_t* ctx;
 
@@ -1192,14 +1197,28 @@ int usb3380_context_init(libusb3380_context_t** octx)
 		return -ENOMEM;
 
 	memset(ctx, 0, sizeof(libusb3380_context_t));
-	if (libusb_init(&ctx->context)) {
-		LOG_ERR("Unable to initialize LIBUSB");
-		res = -EFAULT;
-		goto cleanup_mem;
+	ctx->context = lctx;
+
+	if (lctx == NULL) {
+		if (libusb_init(&ctx->context)) {
+			LOG_ERR("Unable to initialize LIBUSB");
+			res = -EFAULT;
+			goto cleanup_mem;
+		}
 	}
 
-	ctx->handle = libusb_open_device_with_vid_pid(ctx->context, LIBUSB3380_VID,
-												  LIBUSB3380_PID);
+	if (dev == NULL) {
+		ctx->handle = libusb_open_device_with_vid_pid(ctx->context,
+													  LIBUSB3380_VID,
+													  LIBUSB3380_PID);
+	} else {
+		res = libusb_open(dev, &ctx->handle);
+		if (res) {
+			LOG_ERR("Unable to initialize DEVICE: %d", res);
+			goto cleanup_mem;
+		}
+	}
+
 	if (ctx->handle == NULL) {
 		LOG_ERR("Unable to open USB3380!");
 		res = -ENXIO;

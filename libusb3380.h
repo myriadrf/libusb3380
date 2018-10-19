@@ -37,6 +37,7 @@ enum libusb3380_context_vidpid {
 };
 
 int usb3380_context_init(libusb3380_context_t** octx);
+int usb3380_context_init_ex(libusb3380_context_t** octx, libusb_device *dev, libusb_context *ctx);
 void usb3380_context_free(libusb3380_context_t* ctx);
 
 
