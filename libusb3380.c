@@ -143,10 +143,19 @@ typedef struct libusb3380_async_manager {
 	bool stop;
 } libusb3380_async_manager_t;
 
-static void def_log(libusb3380_loglevel_t level, void* obj,
-					const char* message, ...) __attribute__ ((format (printf, 3, 4)));
+static void def_log(libusb3380_loglevel_t level,
+					void* obj,
+					const char* func,
+					const char* file,
+					int line,
+					const char* message, ...) __attribute__ ((format (printf, 6, 7)));
 
-void def_log(libusb3380_loglevel_t level, void* obj, const char* message, ...)
+void def_log(libusb3380_loglevel_t level,
+			 void* obj,
+			 const char* func,
+			 const char* file,
+			 int line,
+			 const char* message, ...)
 {
 	(void)obj;
 
@@ -166,7 +175,7 @@ void def_log(libusb3380_loglevel_t level, void* obj, const char* message, ...)
 	vsnprintf(tmp_buf, sizeof(tmp_buf), message, ap);
 	va_end(ap);
 
-	fprintf(stderr, "%s %s\n", sevirity, tmp_buf);
+	fprintf(stderr, "%s %-16s %s\n", sevirity, func, tmp_buf);
 }
 
 static usb3380_logfunc_t s_logfunc = def_log;
@@ -174,14 +183,14 @@ static void* s_logobj = NULL;
 static libusb3380_loglevel_t s_loglevel = USB3380_LOG_INFO;
 
 #define LOG(x, ...) do { \
-	if (s_loglevel >= (x)) s_logfunc((x), s_logobj, __VA_ARGS__); \
+	if (s_loglevel >= (x)) s_logfunc((x), s_logobj, __FUNCTION__, __FILE__, __LINE__, __VA_ARGS__); \
 	} while(0)
 
-#define LOG_ERR(...) LOG(USB3380_LOG_ERROR, __VA_ARGS__)
-#define LOG_WARN(...) LOG(USB3380_LOG_WARNING, __VA_ARGS__)
-#define LOG_INFO(...) LOG(USB3380_LOG_INFO, __VA_ARGS__)
+#define LOG_ERR(...)   LOG(USB3380_LOG_ERROR,  __VA_ARGS__)
+#define LOG_WARN(...)  LOG(USB3380_LOG_WARNING, __VA_ARGS__)
+#define LOG_INFO(...)  LOG(USB3380_LOG_INFO, __VA_ARGS__)
 #define LOG_DEBUG(...) LOG(USB3380_LOG_DEBUG, __VA_ARGS__)
-#define LOG_DUMP(...) LOG(USB3380_LOG_DUMP, __VA_ARGS__)
+#define LOG_DUMP(...)  LOG(USB3380_LOG_DUMP, __VA_ARGS__)
 
 void usb3380_set_logfunc(usb3380_logfunc_t func, void *param)
 {

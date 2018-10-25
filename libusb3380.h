@@ -49,7 +49,11 @@ typedef enum libusb3380_loglevel {
 	USB3380_LOG_DUMP,
 } libusb3380_loglevel_t;
 
-typedef void (*usb3380_logfunc_t)(libusb3380_loglevel_t lvl, void* obj,
+typedef void (*usb3380_logfunc_t)(libusb3380_loglevel_t lvl,
+								  void* obj,
+								  const char* func,
+								  const char* file,
+								  int line,
 								  const char* message, ...);
 
 void usb3380_set_logfunc(usb3380_logfunc_t func, void *param);
