@@ -83,7 +83,7 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "USB3380 library")
 set(CPACK_PACKAGE_VENDOR              "Fairwaves, Inc.")
 set(CPACK_PACKAGE_CONTACT             "http://fairwaves.co/wp/contact-us/")
 set(CPACK_PACKAGE_VERSION             ${LIBVER}-1)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS      "libc6 (>= 2.17), libusb-1.0")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS      "libc6 (>= 2.17), libusb-1.0-0")
 
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
 set(CPACK_SET_DESTDIR               "")
