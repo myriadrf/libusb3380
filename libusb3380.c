@@ -1223,7 +1223,9 @@ int usb3380_context_init_ex(libusb3380_context_t** octx, libusb_device *dev, lib
 	} else {
 		res = libusb_open(dev, &ctx->handle);
 		if (res) {
-			LOG_ERR("Unable to initialize DEVICE: %d", res);
+			LOG_ERR("Unable to initialize DEVICE: error `%s` (%d)!",
+					libusb_strerror((enum libusb_error)res), res);
+			res = libusb_to_errno(res);
 			goto cleanup_mem;
 		}
 	}
@@ -1234,20 +1236,16 @@ int usb3380_context_init_ex(libusb3380_context_t** octx, libusb_device *dev, lib
 		goto cleanup_ctx;
 	}
 
+#if 0
 	res = libusb_reset_device(ctx->handle);
 	if (res) {
 		LOG_ERR("Unable to reset USB3380: error `%s` (%d)!",
 				libusb_strerror((enum libusb_error)res), res);
-		res = -EACCES;
+		res = libusb_to_errno(res);
 		goto cleanup_handle;
 	}
-/*
-	res = libusb_set_configuration(ctx->handle, 0);
-	if (res) {
-		LOG_WARN("Unable to set configurateion : error `%s` (%d)!",
-				 libusb_strerror((enum libusb_error)res), res);
-	}
-*/
+#endif
+
 	if (libusb_kernel_driver_active(ctx->handle, 0)) {
 		res = libusb_detach_kernel_driver(ctx->handle, 0);
 		if (res) {
@@ -1260,7 +1258,7 @@ int usb3380_context_init_ex(libusb3380_context_t** octx, libusb_device *dev, lib
 	if (res) {
 		LOG_ERR("Unable to claim interface: error `%s` (%d)!",
 				libusb_strerror((enum libusb_error)res), res);
-		res = -EACCES;
+		res = libusb_to_errno(res);
 		goto cleanup_handle;
 	}
 
