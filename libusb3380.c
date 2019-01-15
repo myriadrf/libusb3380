@@ -1324,6 +1324,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 {
 	int res;
 	uint32_t reg;
+	unsigned i;
 	bool reinit = false;
 
 	/* Check intersection of BAR2 and BAR3 spaces */
@@ -1385,6 +1386,23 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		return res;
 	}
 #endif
+	// Check and reset dedicated EP states
+	const char* ep_names[6] = { "CSROUT", "CSRIN", "PCIOUT", "PCIIN", "STATIN",
+								"RCIN" };
+	for (i = 0; i < 6; i++) {
+		res = usb3380_csr_mm_cfg_read(ctx, DEP_RSP + i * 0x10, &reg);
+		if (res) {
+			return res;
+		}
+		LOG_DEBUG("EPd %9s: RSP:%08x Halt:%d Toggle:%d",
+				ep_names[i], reg, (reg & 1) ? 1 : 0, (reg & 2) ? 1 : 0);
+
+		res = usb3380_csr_mm_cfg_write(ctx, DEP_RSP + i * 0x10,
+									   (1<<0) | (1<<2) | (1<<7));
+		if (res) {
+			return res;
+		}
+	}
 
 	res = usb3380_idxreg_read(ctx, CHIPREV, &reg);
 	if (res) {
@@ -1392,6 +1410,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	}
 	LOG_DEBUG("Chip REV %08x", reg);
 
+#if 0
 	res = usb3380_csr_mm_cfg_read(ctx, USBCTL, &reg);
 	if (res) {
 		return res;
@@ -1400,7 +1419,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		   (reg & USBSTAT_SS_MODE) ? 5000 :
 		   (reg & USBSTAT_HS_MODE) ? 480 :
 		   (reg & USBSTAT_FS_MODE) ? 12 : 0);
-
+#endif
 
 	res = usb3380_idxreg_read(ctx, HS_INTPOLL_RATE, &reg);
 	if (res) {
@@ -1542,7 +1561,6 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 	LOG_DEBUG("INCH %8x", reg);
 #endif
 	// Enabgle credit calculation only for requested GPEPs
-	unsigned i;
 	for (reg = 0, i = 0; i < 4; i++) {
 		if (cfg->gpep_fifo_in_size[i] == 0)
 			reg |= (1U << (28 + i));
@@ -1586,23 +1604,6 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		return res;
 	}
 
-	// Check EP states
-	const char* ep_names[6] = { "CSROUT", "CSRIN", "PCIOUT", "PCIIN", "STATIN",
-								"RCIN" };
-	for (i = 0; i < 6; i++) {
-		res = usb3380_csr_mm_cfg_read(ctx, DEP_RSP + i * 0x10, &reg);
-		if (res) {
-			return res;
-		}
-		LOG_DEBUG("EPd %9s: %08x Halt:%d Toggle:%d",
-				ep_names[i], reg, (reg & 1) ? 1 : 0, (reg & 2) ? 1 : 0);
-
-		res = usb3380_csr_mm_cfg_write(ctx, DEP_RSP + i * 0x10, 0);
-		if (res) {
-			return res;
-		}
-	}
-
 	const char* gpep_names[11] = { "EP0", "GPEP0 OUT", "GPEP1 OUT", "GPEP2 OUT",
 								   "GPEP3 OUT", NULL, NULL, "GPEP0 IN",
 								   "GPEP1 IN", "GPEP2 IN", "GPEP3 IN" };
@@ -1610,7 +1611,7 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 		if (i == 5 || i == 6)
 			continue;
 
-		uint32_t eprsp, avail;
+		uint32_t epcfg, eprsp, avail;
 		res = usb3380_csr_mm_cfg_read(ctx, EP_STAT + i * 0x20, &reg);
 		if (res) {
 			return res;
@@ -1624,17 +1625,31 @@ int usb3380_init_root_complex(libusb3380_context_t* ctx,
 			return res;
 		}
 
-		LOG_DEBUG("EPg %9s: %04x %08x %08x Pkts: %2d Avail:%5d Empty:%d Full:%d STALL:%d TO:%d",
+		LOG_DEBUG("EPg %9s: %04x RSP:%08x STAT:%08x Pkts: %2d Avail:%5d Empty:%d Full:%d STALL:%d TO:%d",
 				  gpep_names[i], EP_CFG + i*0x20, eprsp, reg, (reg >> 24) & 0x1f, avail,
 				  (reg & (1<<10)) ? 1 : 0, (reg & (1<<11)) ? 1 : 0,
 				  (reg & (1<<20)) ? 1 : 0, (reg & (1<<21)) ? 1 : 0);
+
+		if (i == 1 || i == 3) { //GPEP0 & GPEP2
+			res = usb3380_csr_mm_cfg_read(ctx, EP_CFG + i * 0x20, &epcfg);
+			if (res) {
+				return res;
+			}
+
+			epcfg = epcfg | (0xfu << 24); // Max burst size
+			res = usb3380_csr_mm_cfg_write(ctx, EP_CFG + i * 0x20, epcfg);
+			if (res) {
+				return res;
+			}
+		}
 
 		res = usb3380_csr_mm_cfg_write(ctx, EP_STAT + i * 0x20, 1<<9);
 		if (res) {
 			return res;
 		}
 
-		res = usb3380_csr_mm_cfg_write(ctx, EP_RSP + i * 0x20, 0);
+		// Clear all response bits, except toggle
+		res = usb3380_csr_mm_cfg_write(ctx, EP_RSP + i * 0x20, 0xfd);
 		if (res) {
 			return res;
 		}
