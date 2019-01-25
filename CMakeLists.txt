@@ -58,7 +58,7 @@ include_directories(.)
 
 set(USB3380_FILES libusb3380.c)
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    set(USB3380_FILES ${USB3380_FILES} xtrx_port.c)
+    set(USB3380_FILES ${USB3380_FILES} ../libxtrxll/xtrxll_port.c)
 endif()
 
 add_library(usb3380 SHARED ${USB3380_FILES})
