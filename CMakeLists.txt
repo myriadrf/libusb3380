@@ -39,6 +39,7 @@ set(CROSS_COMPILE_LIB_PATH     "/usr/${CC_ARCH}/lib")
 find_package(libusb-1.0 REQUIRED)
 
 
+set(LIBUSB3380_RUNTIME_DIR      bin)
 set(LIBUSB3380_LIBRARY_DIR      lib${LIB_SUFFIX})
 set(LIBUSB3380_INCLUDE_DIR      include)
 
@@ -65,7 +66,7 @@ add_library(usb3380 SHARED ${USB3380_FILES})
 target_link_libraries(usb3380 ${LIBUSB_1_LIBRARIES} ${SYSTEM_LIBS})
 set_target_properties(usb3380 PROPERTIES VERSION ${LIBVER} SOVERSION ${MAJOR_VERSION})
 
-install(TARGETS usb3380 DESTINATION ${LIBUSB3380_LIBRARY_DIR})
+install(TARGETS usb3380 DESTINATION ${LIBUSB3380_RUNTIME_DIR})
 install(FILES libusb3380.h DESTINATION ${LIBUSB3380_INCLUDE_DIR})
 
 add_executable(test_libusb3380 test_libusb3380.c)
